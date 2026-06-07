@@ -1,1 +1,4 @@
 .atl/
+.venv/
+__pycache__/
+outputs/

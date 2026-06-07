@@ -102,28 +102,24 @@ def build_merged_dataset(samples: list[Sample], output_dir: str, target_size: tu
 
 
 
-DATASET_DIR = "dataset"
-samples = load_dataset(DATASET_DIR)
+if __name__ == "__main__":
+    DATASET_DIR = "dataset"
+    samples = load_dataset(DATASET_DIR)
 
-# Antes de merge de mascaras 
+    # Antes de merge de mascaras
+    print(f"Total de samples: {len(samples)}")
+    print(f"Sample 55 - Imagen: {samples[55]['image']}")
+    print(f"Sample 55 - Mascaras: {len(samples[55]['masks'])}")
 
-print(f"Total de samples: {len(samples)}")
-print(f"Sample 55 - Imagen: {samples[55]['image']}")
-print(f"Sample 55 - Mascaras: {len(samples[55]['masks'])}")
+    # Despues de merge de imagens
+    mask = merge_masks(samples[0]['masks'])
+    print(mask.shape)
 
+    # Visualizar ejemplo
+    visualize_samples(samples, n=5)
 
-# Despues de merge de imagens 
-mask = merge_masks(samples[0]['masks'])
-print(mask.shape)
+    # Creacion del dataset fusionado
+    DATASET_MERGED_DIR = "dataset_fusionado"
+    build_merged_dataset(samples, DATASET_MERGED_DIR)
 
-
-# Visualizar ejemplo
-
-visualize_samples(samples, n=5)
-
-# Creacion del dataset fusionado
-
-DATASET_MERGED_DIR = "dataset_fusionado"
-build_merged_dataset(samples, DATASET_MERGED_DIR)
-
-print(f"\nDataset fusionado creado en: {DATASET_MERGED_DIR}")
+    print(f"\nDataset fusionado creado en: {DATASET_MERGED_DIR}")
