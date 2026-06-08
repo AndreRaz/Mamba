@@ -72,14 +72,51 @@ outputs/unet-cpu-safe/history.json
 outputs/unet-cpu-safe/metrics.json
 ```
 
-### CUDA/GPU en este entorno
+## Comparacion actual: U-Net vs Mamba-UNet
 
-TensorFlow 2.21.0 esta compilado con soporte CUDA, pero no pudo registrar GPU por librerias CUDA/cuDNN no disponibles o no cargables. La verificacion mostro `physical_gpus=[]` y el entrenamiento se hizo por CPU. Para intentar GPU en otra maquina, instalar las librerias CUDA/cuDNN compatibles con TensorFlow y ejecutar con `--device auto` o `--device gpu`.
+Conclusion: en esta corrida completa, **U-Net gano en Dice e IoU**, que son las metricas mas importantes para segmentacion binaria de mascaras. El hibrido **Mamba-UNet gano en `val_accuracy`, `val_loss`, precision y specificity**, pero con menor Dice/IoU y mas parametros.
 
-### Entrenamiento mas completo
+La comparacion se ejecuto con el mismo dataset fusionado, 670 pares imagen/mascara, split fijo de 536 entrenamiento y 134 validacion, batch 4, 20 epocas configuradas y 32 filtros base. TensorFlow detecto la GPU RTX 2050 con `--device auto`; durante el entrenamiento aparecieron avisos de memoria GPU, pero ambas corridas terminaron y guardaron metricas/modelos.
 
-Cuando haya GPU funcional o se acepte una corrida CPU mas larga, usar mas epocas, mas filtros y quitar los limites de pasos:
+### Comandos ejecutados
 
 ```bash
-python src/train_unet.py --device auto --epochs 20 --batch-size 4 --filters 32 --output-dir outputs/unet-full
+.venv/bin/python src/train_unet.py --model unet --device auto --epochs 20 --batch-size 4 --filters 32 --output-dir outputs/unet-full
+.venv/bin/python src/train_unet.py --model mamba --device auto --epochs 20 --batch-size 4 --filters 32 --output-dir outputs/mamba-full
 ```
+
+### Resultados finales
+
+| Modelo | Epocas reales | Parametros | Tiempo | Val accuracy | Val loss | Dice | IoU | Precision | Recall | Specificity |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| U-Net | 20 | 8,634,465 | 632.94 s | 0.9334 | 0.1481 | **0.8940** | **0.8084** | 0.8808 | **0.9076** | 0.9789 |
+| Mamba-UNet | 14 | 9,429,601 | 575.51 s | **0.9609** | **0.0988** | 0.8846 | 0.7932 | **0.9096** | 0.8610 | **0.9853** |
+
+Mamba-UNet quedo en 14 epocas reales porque `EarlyStopping` corto antes de la epoca 20 al no mejorar `val_loss`. Eso no invalida la comparacion: ambos modelos tuvieron el mismo maximo de epocas y el mismo criterio de parada.
+
+### Graficas generadas
+
+![Curvas de perdida](docs/assets/comparison/loss_curves.png)
+
+![Curvas de accuracy](docs/assets/comparison/accuracy_curves.png)
+
+![Metricas de segmentacion](docs/assets/comparison/segmentation_metrics.png)
+
+Tambien quedan disponibles las curvas individuales generadas por el script:
+
+| Modelo | Curvas individuales | Metricas |
+|---|---|---|
+| U-Net | `outputs/unet-full/learning_curves.png` | `outputs/unet-full/metrics.json` |
+| Mamba-UNet | `outputs/mamba-full/learning_curves.png` | `outputs/mamba-full/metrics.json` |
+
+### Cuando conviene U-Net
+
+Conviene usar **U-Net** cuando el objetivo principal es maximizar solapamiento de mascara: Dice e IoU. En esta corrida U-Net segmento mejor a nivel de area real, tuvo menos parametros y mejor recall, asi que es la opcion mas fuerte si se busca no perder celulas u objetos positivos.
+
+### Cuando conviene Mamba-UNet
+
+Conviene probar **Mamba-UNet** cuando se prioriza reducir falsos positivos o capturar contexto global con una variante mas expresiva. En esta corrida tuvo mejor precision, specificity, `val_accuracy` y `val_loss`, pero no supero a U-Net en Dice/IoU. Para elegirlo como modelo final haria falta validar si esa mayor precision compensa perder recall y solapamiento.
+
+### Caveat tecnico
+
+La accuracy de pixeles puede ser enganosa en segmentacion porque suele estar dominada por el fondo. Por eso la decision principal se debe apoyar en Dice e IoU, no solo en accuracy.

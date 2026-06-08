@@ -12,10 +12,11 @@ IMAGE_SIZE = (256, 256)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the U-Net segmentation model.")
+    parser.add_argument("--model", choices=("unet", "mamba"), default="unet", help="Model variant to train.")
     parser.add_argument("--images-dir", default="dataset_fusionado/images")
     parser.add_argument("--masks-dir", default="dataset_fusionado/masks")
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--filters", type=int, default=32, help="Base number of U-Net filters.")
     parser.add_argument("--steps-per-epoch", type=int, default=None)
     parser.add_argument("--validation-steps", type=int, default=None)
@@ -146,6 +147,35 @@ def build_dataset(image_paths, mask_paths, batch_size: int, shuffle: bool, tf):
     return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 
+def build_model(model_name: str, filters: int):
+    if model_name == "unet":
+        from models.unet import build_unet
+
+        return build_unet(input_size=(256, 256, 3), n_filters=filters, n_classes=1)
+
+    from models.mamba import build_mamba_unet
+
+    return build_mamba_unet(input_size=(256, 256, 3), n_filters=filters, n_classes=1)
+
+
+def evaluate_segmentation_metrics(model, dataset, steps: int | None):
+    import numpy as np
+    from utils.metrics import compute_segmentation_metrics
+
+    y_true_batches = []
+    y_pred_batches = []
+    for step_index, (images, masks) in enumerate(dataset):
+        if steps is not None and step_index >= steps:
+            break
+        y_true_batches.append(masks.numpy())
+        y_pred_batches.append(model.predict(images, verbose=0))
+
+    if not y_true_batches:
+        return {}
+
+    return compute_segmentation_metrics(np.concatenate(y_true_batches), np.concatenate(y_pred_batches))
+
+
 def main():
     args = parse_args()
     image_paths, mask_paths = collect_pairs(args.images_dir, args.masks_dir)
@@ -164,30 +194,37 @@ def main():
         raise ValueError("At least 2 image/mask pairs are required for train/validation split.")
 
     tf = configure_tensorflow(args.device, args.gpu_index)
-    from models.unet import build_unet
 
     train_images, valid_images, train_masks, valid_masks = train_validation_split(image_paths, mask_paths)
 
     train_ds = build_dataset(train_images, train_masks, args.batch_size, shuffle=True, tf=tf)
     valid_ds = build_dataset(valid_images, valid_masks, args.batch_size, shuffle=False, tf=tf)
 
-    unet = build_unet(input_size=(256, 256, 3), n_filters=args.filters, n_classes=1)
-    unet.compile(
+    model = build_model(args.model, args.filters)
+    model.compile(
         optimizer=tf.keras.optimizers.Adam(),
         loss=tf.keras.losses.BinaryCrossentropy(),
         metrics=["accuracy"],
     )
 
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=5,
+        restore_best_weights=True,
+    )
+
     started_at = time.time()
-    history = unet.fit(
+    history = model.fit(
         train_ds,
         epochs=args.epochs,
         validation_data=valid_ds,
         steps_per_epoch=args.steps_per_epoch,
         validation_steps=args.validation_steps,
+        callbacks=[early_stopping],
     )
 
     duration_seconds = time.time() - started_at
+    segmentation_metrics = evaluate_segmentation_metrics(model, valid_ds, args.validation_steps)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -195,9 +232,11 @@ def main():
     history_path = output_dir / "history.json"
     metrics_path = output_dir / "metrics.json"
 
-    unet.save(model_path)
+    model.save(model_path)
     metrics = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "model": args.model,
+        "parameter_count": model.count_params(),
         "duration_seconds": round(duration_seconds, 2),
         "dataset_pairs": len(image_paths),
         "train_pairs": len(train_images),
@@ -209,10 +248,14 @@ def main():
         "validation_steps": args.validation_steps,
         "history": history.history,
         "final_metrics": {name: values[-1] for name, values in history.history.items() if values},
+        "segmentation_metrics": segmentation_metrics,
         "model_path": str(model_path),
     }
     history_path.write_text(json.dumps(history.history, indent=2), encoding="utf-8")
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    from utils.metrics import plot_learning_curves
+    plot_learning_curves(history.history, output_dir)
 
     print(f"Training duration: {duration_seconds:.2f} seconds")
     print(f"Saved model: {model_path}")
