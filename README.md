@@ -74,15 +74,39 @@ outputs/unet-cpu-safe/metrics.json
 
 ## Comparacion actual: U-Net vs Mamba-UNet
 
-Conclusion: en esta corrida completa, **U-Net gano en Dice e IoU**, que son las metricas mas importantes para segmentacion binaria de mascaras. El hibrido **Mamba-UNet gano en `val_accuracy`, `val_loss`, precision y specificity**, pero con menor Dice/IoU y mas parametros.
+Conclusion: en la corrida completa, **U-Net gano en Dice e IoU**, que son las metricas mas importantes para segmentacion binaria de mascaras. El hibrido **Mamba-UNet (selective scan) gano en `val_accuracy`, `val_loss`, precision y specificity**, redujo la brecha de Dice/IoU respecto a la version anterior del bloque y convergio en menos epocas.
 
-La comparacion se ejecuto con el mismo dataset fusionado, 670 pares imagen/mascara, split fijo de 536 entrenamiento y 134 validacion, batch 4, 20 epocas configuradas y 32 filtros base. TensorFlow detecto la GPU RTX 2050 con `--device auto`; durante el entrenamiento aparecieron avisos de memoria GPU, pero ambas corridas terminaron y guardaron metricas/modelos.
+La comparacion se ejecuto con el mismo dataset fusionado, 670 pares imagen/mascara, split fijo de 536 entrenamiento y 134 validacion, batch 4, 20 epocas configuradas y 32 filtros base. TensorFlow detecto la GPU RTX 2050 con `--device auto`.
+
+### Arquitectura del bloque Mamba
+
+El bottleneck de `src/models/mamba.py` implementa un selective scan real (capa `SelectiveScan2D`):
+
+- Parametros `delta`, `B` y `C` proyectados desde cada token de entrada (selectividad, la contribucion central de Mamba).
+- Matriz `A` con inicializacion S4D-real (`A_n = -(n+1)`), almacenada como `A_log` para mantener decaimiento estable.
+- Discretizacion ZOH y recurrencia `h_t = exp(delta A) h_{t-1} + delta B x_t` ejecutada con `tf.scan`.
+- Barrido en 4 direcciones (filas/columnas, ida/vuelta) con pesos compartidos, al estilo SS2D de VMamba.
+
+Una version anterior del bloque (`mamba-full`) usaba un promedio acumulativo direccional sin recurrencia selectiva; se conserva en la tabla como referencia historica.
 
 ### Comandos ejecutados
 
 ```bash
 .venv/bin/python src/train_unet.py --model unet --device auto --epochs 20 --batch-size 4 --filters 32 --output-dir outputs/unet-full
-.venv/bin/python src/train_unet.py --model mamba --device auto --epochs 20 --batch-size 4 --filters 32 --output-dir outputs/mamba-full
+.venv/bin/python src/train_unet.py --model mamba --device auto --epochs 20 --batch-size 4 --filters 32 --output-dir outputs/mamba-selective
+```
+
+### CLI de comparacion
+
+`src/compare.py` lee los `metrics.json` de cada corrida y genera la tabla, un reporte Markdown y graficas superpuestas:
+
+```bash
+# Auto-descubre todas las corridas bajo outputs/
+.venv/bin/python src/compare.py
+
+# Corridas especificas + reporte y graficas
+.venv/bin/python src/compare.py --runs outputs/unet-full outputs/mamba-selective \
+    --plot --markdown outputs/comparison/report.md
 ```
 
 ### Resultados finales
@@ -90,9 +114,10 @@ La comparacion se ejecuto con el mismo dataset fusionado, 670 pares imagen/masca
 | Modelo | Epocas reales | Parametros | Tiempo | Val accuracy | Val loss | Dice | IoU | Precision | Recall | Specificity |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | U-Net | 20 | 8,634,465 | 632.94 s | 0.9334 | 0.1481 | **0.8940** | **0.8084** | 0.8808 | **0.9076** | 0.9789 |
-| Mamba-UNet | 14 | 9,429,601 | 575.51 s | **0.9609** | **0.0988** | 0.8846 | 0.7932 | **0.9096** | 0.8610 | **0.9853** |
+| Mamba-UNet (selective scan) | 11 | 9,487,969 | 601.27 s | **0.9653** | **0.0870** | 0.8885 | 0.7994 | 0.9055 | 0.8722 | 0.9843 |
+| Mamba-UNet (bloque anterior) | 14 | 9,429,601 | 575.51 s | 0.9609 | 0.0988 | 0.8846 | 0.7932 | **0.9096** | 0.8610 | **0.9853** |
 
-Mamba-UNet quedo en 14 epocas reales porque `EarlyStopping` corto antes de la epoca 20 al no mejorar `val_loss`. Eso no invalida la comparacion: ambos modelos tuvieron el mismo maximo de epocas y el mismo criterio de parada.
+Las variantes Mamba cortaron antes de la epoca 20 por `EarlyStopping` sobre `val_loss`. Eso no invalida la comparacion: todos los modelos tuvieron el mismo maximo de epocas y el mismo criterio de parada. El selective scan convergio mas rapido (11 epocas) y con mejor `val_loss` que ambas alternativas.
 
 ### Graficas generadas
 
@@ -107,7 +132,10 @@ Tambien quedan disponibles las curvas individuales generadas por el script:
 | Modelo | Curvas individuales | Metricas |
 |---|---|---|
 | U-Net | `outputs/unet-full/learning_curves.png` | `outputs/unet-full/metrics.json` |
-| Mamba-UNet | `outputs/mamba-full/learning_curves.png` | `outputs/mamba-full/metrics.json` |
+| Mamba-UNet (selective scan) | `outputs/mamba-selective/learning_curves.png` | `outputs/mamba-selective/metrics.json` |
+| Mamba-UNet (bloque anterior) | `outputs/mamba-full/learning_curves.png` | `outputs/mamba-full/metrics.json` |
+
+Las graficas comparativas generadas por el CLI quedan en `outputs/comparison/compare_val_loss.png` y `outputs/comparison/compare_val_accuracy.png`, junto al reporte `outputs/comparison/report.md`.
 
 ### Cuando conviene U-Net
 
@@ -115,7 +143,7 @@ Conviene usar **U-Net** cuando el objetivo principal es maximizar solapamiento d
 
 ### Cuando conviene Mamba-UNet
 
-Conviene probar **Mamba-UNet** cuando se prioriza reducir falsos positivos o capturar contexto global con una variante mas expresiva. En esta corrida tuvo mejor precision, specificity, `val_accuracy` y `val_loss`, pero no supero a U-Net en Dice/IoU. Para elegirlo como modelo final haria falta validar si esa mayor precision compensa perder recall y solapamiento.
+Conviene probar **Mamba-UNet (selective scan)** cuando se prioriza reducir falsos positivos, capturar contexto global o converger en menos epocas. En esta corrida tuvo mejor precision, specificity, `val_accuracy` y `val_loss` que U-Net, y quedo a solo 0.0055 de Dice con casi la mitad de epocas de entrenamiento. Para elegirlo como modelo final haria falta validar si esa mayor precision y convergencia compensan la leve perdida de recall y solapamiento.
 
 ### Caveat tecnico
 
